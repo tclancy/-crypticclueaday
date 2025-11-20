@@ -1,32 +1,39 @@
 import { Handler } from '@netlify/functions'
-import { MemoryDatabase } from '../../src/db/memory'
-import { ServerlessFirehoseSubscription } from '../../src/subscription/serverless'
 
-// Simple in-memory storage (resets on each cold start)
-let memoryDb: MemoryDatabase | null = null
-let firehose: ServerlessFirehoseSubscription | null = null
-
-const getDatabase = () => {
-  if (!memoryDb) {
-    memoryDb = new MemoryDatabase()
+// Bluesky search API to find posts with hashtags
+async function searchCrypticCluePosts(limit: number = 50, cursor?: string) {
+  try {
+    const searchUrl = 'https://bsky.social/xrpc/app.bsky.feed.searchPosts'
+    const params = new URLSearchParams({
+      q: '#crypticclueaday',
+      limit: limit.toString()
+    })
     
-    // Start firehose subscription
-    if (!firehose) {
-      firehose = new ServerlessFirehoseSubscription(
-        memoryDb,
-        process.env.FEEDGEN_SUBSCRIPTION_ENDPOINT || 'wss://bsky.network',
-        parseInt(process.env.FEEDGEN_SUBSCRIPTION_RECONNECT_DELAY || '3000', 10)
-      )
-      firehose.start()
-      console.log('Started firehose subscription')
+    if (cursor) {
+      params.set('cursor', cursor)
     }
+    
+    const response = await fetch(`${searchUrl}?${params}`)
+    
+    if (!response.ok) {
+      console.error('Search API error:', response.status, response.statusText)
+      return { posts: [], cursor: undefined }
+    }
+    
+    const data = await response.json() as any
+    
+    return {
+      posts: data.posts || [],
+      cursor: data.cursor
+    }
+  } catch (error) {
+    console.error('Error searching posts:', error)
+    return { posts: [], cursor: undefined }
   }
-  return memoryDb
 }
 
 export const handler: Handler = async (event, context) => {
   try {
-    const db = getDatabase()
     
     // Handle basic feed endpoints
     if (event.path === '/.well-known/did.json') {
@@ -67,15 +74,15 @@ export const handler: Handler = async (event, context) => {
         const limit = parseInt(event.queryStringParameters?.limit || '50', 10)
         const cursor = event.queryStringParameters?.cursor
         
-        // Get posts from database
-        const result = await db.getPostsForFeed(limit, cursor)
+        // Search for posts with hashtag
+        const searchResult = await searchCrypticCluePosts(limit, cursor)
         
         return {
           statusCode: 200,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            feed: result.posts.map(post => ({ post: post.uri })),
-            cursor: result.cursor
+            feed: searchResult.posts.map((post: any) => ({ post: post.uri })),
+            cursor: searchResult.cursor
           })
         }
       }
@@ -83,12 +90,17 @@ export const handler: Handler = async (event, context) => {
 
     // Debug endpoint
     if (event.path === '/debug') {
+      const searchResult = await searchCrypticCluePosts(10)
       return {
         statusCode: 200,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          postCount: db.getPostCount(),
-          message: 'Debug info for feed generator'
+          postCount: searchResult.posts.length,
+          message: 'Debug info for feed generator',
+          recentPosts: searchResult.posts.slice(0, 3).map((p: any) => ({
+            uri: p.uri,
+            text: p.record?.text?.slice(0, 100) + '...'
+          }))
         })
       }
     }
