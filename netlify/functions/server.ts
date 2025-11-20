@@ -28,17 +28,61 @@ async function initializeDatabase() {
   }
 }
 
+// Authenticate with Bluesky and get access token
+async function getBlueskyAuth() {
+  try {
+    const username = process.env.BLUESKY_USERNAME
+    const password = process.env.BLUESKY_PASSWORD
+    
+    if (!username || !password) {
+      console.error('Missing Bluesky credentials')
+      return null
+    }
+    
+    const response = await fetch('https://bsky.social/xrpc/com.atproto.server.createSession', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        identifier: username,
+        password: password
+      })
+    })
+    
+    if (!response.ok) {
+      console.error('Auth failed:', response.status, await response.text())
+      return null
+    }
+    
+    const auth = await response.json() as any
+    return auth.accessJwt
+  } catch (error) {
+    console.error('Auth error:', error)
+    return null
+  }
+}
+
 // Search for and ingest new posts from your account
 async function ingestRecentPosts() {
   try {
     const yourDID = process.env.FEEDGEN_PUBLISHER_DID
     if (!yourDID) return
     
-    // Search for your recent posts
-    const response = await fetch(`https://bsky.social/xrpc/app.bsky.feed.getAuthorFeed?actor=${yourDID}&limit=20`)
+    // Get authentication token
+    const accessToken = await getBlueskyAuth()
+    if (!accessToken) {
+      console.log('Failed to authenticate with Bluesky')
+      return
+    }
+    
+    // Search for your recent posts with auth
+    const response = await fetch(`https://bsky.social/xrpc/app.bsky.feed.getAuthorFeed?actor=${yourDID}&limit=20`, {
+      headers: {
+        'Authorization': `Bearer ${accessToken}`
+      }
+    })
     
     if (!response.ok) {
-      console.log('Failed to fetch author feed:', response.status)
+      console.log('Failed to fetch author feed:', response.status, await response.text())
       return
     }
     
@@ -55,6 +99,7 @@ async function ingestRecentPosts() {
             ON CONFLICT (uri) DO NOTHING
           `
           addedCount++
+          console.log(`Added post: ${post.record.text.slice(0, 50)}...`)
         } catch (insertError) {
           console.error('Insert error for post:', post.uri, insertError)
         }
@@ -63,6 +108,8 @@ async function ingestRecentPosts() {
     
     if (addedCount > 0) {
       console.log(`Added ${addedCount} new #crypticclueaday posts`)
+    } else {
+      console.log('No new #crypticclueaday posts found')
     }
   } catch (error) {
     console.error('Ingest error:', error)
