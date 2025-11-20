@@ -28,6 +28,47 @@ async function initializeDatabase() {
   }
 }
 
+// Search for and ingest new posts from your account
+async function ingestRecentPosts() {
+  try {
+    const yourDID = process.env.FEEDGEN_PUBLISHER_DID
+    if (!yourDID) return
+    
+    // Search for your recent posts
+    const response = await fetch(`https://bsky.social/xrpc/app.bsky.feed.getAuthorFeed?actor=${yourDID}&limit=20`)
+    
+    if (!response.ok) {
+      console.log('Failed to fetch author feed:', response.status)
+      return
+    }
+    
+    const data = await response.json() as any
+    let addedCount = 0
+    
+    for (const item of data.feed || []) {
+      const post = item.post
+      if (post.record?.text?.includes('#crypticclueaday')) {
+        try {
+          await sql`
+            INSERT INTO posts (uri, cid, text, author_did, created_at)
+            VALUES (${post.uri}, ${post.cid}, ${post.record.text}, ${post.author.did}, ${post.record.createdAt})
+            ON CONFLICT (uri) DO NOTHING
+          `
+          addedCount++
+        } catch (insertError) {
+          console.error('Insert error for post:', post.uri, insertError)
+        }
+      }
+    }
+    
+    if (addedCount > 0) {
+      console.log(`Added ${addedCount} new #crypticclueaday posts`)
+    }
+  } catch (error) {
+    console.error('Ingest error:', error)
+  }
+}
+
 // Get posts for feed from database
 async function getPostsFromDatabase(limit: number = 50, cursor?: string) {
   try {
@@ -70,6 +111,11 @@ export const handler: Handler = async (event, context) => {
   try {
     // Initialize database on first call
     await initializeDatabase()
+    
+    // Ingest recent posts whenever feed is accessed
+    if (event.path === '/xrpc/app.bsky.feed.getFeedSkeleton' || event.path === '/debug') {
+      await ingestRecentPosts()
+    }
     
     // Handle basic feed endpoints
     if (event.path === '/.well-known/did.json') {
