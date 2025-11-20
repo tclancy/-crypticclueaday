@@ -1,0 +1,15 @@
+[build]
+  command = "yarn build"
+  functions = "dist/netlify/functions"
+  publish = "dist"
+
+[functions]
+  node_bundler = "esbuild"
+
+[[redirects]]
+  from = "/*"
+  to = "/.netlify/functions/server"
+  status = 200
+
+[build.environment]
+  NODE_VERSION = "18"
