@@ -6,7 +6,9 @@
       "Bash(rm:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(yarn build)"
+      "Bash(yarn build)",
+      "WebFetch(domain:neon.com)",
+      "WebSearch"
     ],
     "deny": [],
     "ask": []
