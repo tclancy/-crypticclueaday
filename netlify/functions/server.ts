@@ -1,12 +1,25 @@
 import { Handler } from '@netlify/functions'
 import { MemoryDatabase } from '../../src/db/memory'
+import { ServerlessFirehoseSubscription } from '../../src/subscription/serverless'
 
 // Simple in-memory storage (resets on each cold start)
 let memoryDb: MemoryDatabase | null = null
+let firehose: ServerlessFirehoseSubscription | null = null
 
 const getDatabase = () => {
   if (!memoryDb) {
     memoryDb = new MemoryDatabase()
+    
+    // Start firehose subscription
+    if (!firehose) {
+      firehose = new ServerlessFirehoseSubscription(
+        memoryDb,
+        process.env.FEEDGEN_SUBSCRIPTION_ENDPOINT || 'wss://bsky.network',
+        parseInt(process.env.FEEDGEN_SUBSCRIPTION_RECONNECT_DELAY || '3000', 10)
+      )
+      firehose.start()
+      console.log('Started firehose subscription')
+    }
   }
   return memoryDb
 }
@@ -50,14 +63,33 @@ export const handler: Handler = async (event, context) => {
     if (event.path === '/xrpc/app.bsky.feed.getFeedSkeleton') {
       const feed = event.queryStringParameters?.feed
       if (feed?.includes('crypticclueaday')) {
-        // Return empty feed for now (will populate as firehose data comes in)
+        // Parse query parameters
+        const limit = parseInt(event.queryStringParameters?.limit || '50', 10)
+        const cursor = event.queryStringParameters?.cursor
+        
+        // Get posts from database
+        const result = await db.getPostsForFeed(limit, cursor)
+        
         return {
           statusCode: 200,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            feed: []
+            feed: result.posts.map(post => ({ post: post.uri })),
+            cursor: result.cursor
           })
         }
+      }
+    }
+
+    // Debug endpoint
+    if (event.path === '/debug') {
+      return {
+        statusCode: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          postCount: db.getPostCount(),
+          message: 'Debug info for feed generator'
+        })
       }
     }
 
@@ -70,7 +102,8 @@ export const handler: Handler = async (event, context) => {
         endpoints: [
           '/.well-known/did.json',
           '/xrpc/app.bsky.feed.describeFeedGenerator',
-          '/xrpc/app.bsky.feed.getFeedSkeleton'
+          '/xrpc/app.bsky.feed.getFeedSkeleton',
+          '/debug'
         ]
       })
     }
