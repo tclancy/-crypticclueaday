@@ -31,27 +31,27 @@ async function initializeDatabase() {
 // Get posts for feed from database
 async function getPostsFromDatabase(limit: number = 50, cursor?: string) {
   try {
-    let query = sql`
-      SELECT uri, cid, indexed_at 
-      FROM posts 
-      WHERE text ILIKE '%#crypticclueaday%'
-    `
+    let posts
     
     if (cursor) {
       const cursorDate = new Date(parseInt(cursor, 10))
-      query = sql`
+      posts = await sql`
         SELECT uri, cid, indexed_at 
         FROM posts 
         WHERE text ILIKE '%#crypticclueaday%'
         AND indexed_at < ${cursorDate}
+        ORDER BY indexed_at DESC 
+        LIMIT ${limit}
+      `
+    } else {
+      posts = await sql`
+        SELECT uri, cid, indexed_at 
+        FROM posts 
+        WHERE text ILIKE '%#crypticclueaday%'
+        ORDER BY indexed_at DESC 
+        LIMIT ${limit}
       `
     }
-    
-    const posts = await sql`
-      ${query}
-      ORDER BY indexed_at DESC 
-      LIMIT ${limit}
-    `
     
     let nextCursor: string | undefined
     if (posts.length === limit) {
