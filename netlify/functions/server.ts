@@ -22,6 +22,22 @@ async function initializeDatabase() {
       CREATE INDEX IF NOT EXISTS idx_posts_indexed_at ON posts(indexed_at DESC)
     `
     
+    // Create separate table for Dover NH posts
+    await sql`
+      CREATE TABLE IF NOT EXISTS dovernh_posts (
+        uri TEXT PRIMARY KEY,
+        cid TEXT NOT NULL,
+        indexed_at TIMESTAMP DEFAULT NOW(),
+        text TEXT,
+        author_did TEXT,
+        created_at TIMESTAMP
+      )
+    `
+    
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_dovernh_posts_indexed_at ON dovernh_posts(indexed_at DESC)
+    `
+    
     console.log('Database initialized')
   } catch (error) {
     console.error('Database initialization error:', error)
@@ -61,6 +77,29 @@ async function getBlueskyAuth() {
   }
 }
 
+// Check if post matches Dover NH criteria
+function matchesDoverNH(text: string): boolean {
+  const lowerText = text.toLowerCase()
+  
+  // Check hashtags
+  if (lowerText.includes('#dovernh') || lowerText.includes('#03820')) {
+    return true
+  }
+  
+  // Check location references
+  const doverPatterns = [
+    'dover, nh',
+    'dover nh',
+    'dover, new hampshire',
+    'dover new hampshire',
+    'dover n.h.',
+    'dover n h',
+    '03820'
+  ]
+  
+  return doverPatterns.some(pattern => lowerText.includes(pattern))
+}
+
 // Search for and ingest new posts from your account
 async function ingestRecentPosts() {
   try {
@@ -87,39 +126,62 @@ async function ingestRecentPosts() {
     }
     
     const data = await response.json() as any
-    let addedCount = 0
+    let crypticCount = 0
+    let doverCount = 0
     
     for (const item of data.feed || []) {
       const post = item.post
-      if (post.record?.text?.includes('#crypticclueaday')) {
+      const postText = post.record?.text || ''
+      
+      // Check for cryptic clue posts
+      if (postText.includes('#crypticclueaday')) {
         try {
           await sql`
             INSERT INTO posts (uri, cid, text, author_did, created_at)
-            VALUES (${post.uri}, ${post.cid}, ${post.record.text}, ${post.author.did}, ${post.record.createdAt})
+            VALUES (${post.uri}, ${post.cid}, ${postText}, ${post.author.did}, ${post.record.createdAt})
             ON CONFLICT (uri) DO NOTHING
           `
-          addedCount++
-          console.log(`Added post: ${post.record.text.slice(0, 50)}...`)
+          crypticCount++
+          console.log(`Added cryptic clue: ${postText.slice(0, 50)}...`)
         } catch (insertError) {
-          console.error('Insert error for post:', post.uri, insertError)
+          console.error('Insert error for cryptic clue post:', post.uri, insertError)
+        }
+      }
+      
+      // Check for Dover NH posts
+      if (matchesDoverNH(postText)) {
+        try {
+          await sql`
+            INSERT INTO dovernh_posts (uri, cid, text, author_did, created_at)
+            VALUES (${post.uri}, ${post.cid}, ${postText}, ${post.author.did}, ${post.record.createdAt})
+            ON CONFLICT (uri) DO NOTHING
+          `
+          doverCount++
+          console.log(`Added Dover NH post: ${postText.slice(0, 50)}...`)
+        } catch (insertError) {
+          console.error('Insert error for Dover NH post:', post.uri, insertError)
         }
       }
     }
     
-    if (addedCount > 0) {
-      console.log(`Added ${addedCount} new #crypticclueaday posts`)
-    } else {
-      console.log('No new #crypticclueaday posts found')
+    if (crypticCount > 0) {
+      console.log(`Added ${crypticCount} new #crypticclueaday posts`)
+    }
+    if (doverCount > 0) {
+      console.log(`Added ${doverCount} new Dover NH posts`)
+    }
+    if (crypticCount === 0 && doverCount === 0) {
+      console.log('No new posts found for either feed')
     }
   } catch (error) {
     console.error('Ingest error:', error)
   }
 }
 
-// Get posts for feed from database
-async function getPostsFromDatabase(limit: number = 50, cursor?: string) {
+// Get posts for cryptic clue feed from database
+async function getCrypticCluePostsFromDatabase(limit: number = 50, cursor?: string) {
   try {
-    let posts
+    let posts: any[]
     
     if (cursor) {
       const cursorDate = new Date(parseInt(cursor, 10))
@@ -154,7 +216,43 @@ async function getPostsFromDatabase(limit: number = 50, cursor?: string) {
   }
 }
 
-export const handler: Handler = async (event, context) => {
+// Get posts for Dover NH feed from database
+async function getDoverNHPostsFromDatabase(limit: number = 50, cursor?: string) {
+  try {
+    let posts: any[]
+    
+    if (cursor) {
+      const cursorDate = new Date(parseInt(cursor, 10))
+      posts = await sql`
+        SELECT uri, cid, indexed_at 
+        FROM dovernh_posts 
+        WHERE indexed_at < ${cursorDate}
+        ORDER BY indexed_at DESC 
+        LIMIT ${limit}
+      `
+    } else {
+      posts = await sql`
+        SELECT uri, cid, indexed_at 
+        FROM dovernh_posts 
+        ORDER BY indexed_at DESC 
+        LIMIT ${limit}
+      `
+    }
+    
+    let nextCursor: string | undefined
+    if (posts.length === limit) {
+      const lastPost = posts[posts.length - 1]
+      nextCursor = new Date(lastPost.indexed_at).getTime().toString()
+    }
+    
+    return { posts, cursor: nextCursor }
+  } catch (error) {
+    console.error('Database query error:', error)
+    return { posts: [], cursor: undefined }
+  }
+}
+
+export const handler: Handler = async (event) => {
   try {
     // Initialize database on first call
     await initializeDatabase()
@@ -191,6 +289,9 @@ export const handler: Handler = async (event, context) => {
           feeds: [{
             uri: `at://${process.env.FEEDGEN_PUBLISHER_DID}/app.bsky.feed.generator/crypticclueaday`,
             cid: "bafyreidykglsfhoixmivffc5uwhcgshx4j465xwqntbmu43nb2dzqwfvae"
+          }, {
+            uri: `at://${process.env.FEEDGEN_PUBLISHER_DID}/app.bsky.feed.generator/dovernh`,
+            cid: "bafyreidykglsfhoixmivffc5uwhcgshx4j465xwqntbmu43nb2dzqwfvae"
           }]
         })
       }
@@ -198,13 +299,26 @@ export const handler: Handler = async (event, context) => {
 
     if (event.path === '/xrpc/app.bsky.feed.getFeedSkeleton') {
       const feed = event.queryStringParameters?.feed
+      const limit = parseInt(event.queryStringParameters?.limit || '50', 10)
+      const cursor = event.queryStringParameters?.cursor
+      
       if (feed?.includes('crypticclueaday')) {
-        // Parse query parameters
-        const limit = parseInt(event.queryStringParameters?.limit || '50', 10)
-        const cursor = event.queryStringParameters?.cursor
+        // Get cryptic clue posts from database
+        const result = await getCrypticCluePostsFromDatabase(limit, cursor)
         
-        // Get posts from database
-        const result = await getPostsFromDatabase(limit, cursor)
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            feed: result.posts.map((post: any) => ({ post: post.uri })),
+            cursor: result.cursor
+          })
+        }
+      }
+      
+      if (feed?.includes('dovernh')) {
+        // Get Dover NH posts from database
+        const result = await getDoverNHPostsFromDatabase(limit, cursor)
         
         return {
           statusCode: 200,
@@ -254,16 +368,21 @@ export const handler: Handler = async (event, context) => {
 
     // Debug endpoint
     if (event.path === '/debug') {
-      const dbResult = await getPostsFromDatabase(10)
+      const crypticResult = await getCrypticCluePostsFromDatabase(10)
+      const doverResult = await getDoverNHPostsFromDatabase(10)
       return {
         statusCode: 200,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          postCount: dbResult.posts.length,
-          message: 'Debug info for feed generator',
-          recentPosts: dbResult.posts.slice(0, 3).map((p: any) => ({
+          crypticClueCount: crypticResult.posts.length,
+          doverNHCount: doverResult.posts.length,
+          message: 'Debug info for both feed generators',
+          recentCrypticPosts: crypticResult.posts.slice(0, 2).map((p: any) => ({
             uri: p.uri,
-            text: p.text?.slice(0, 100) + '...',
+            indexed_at: p.indexed_at
+          })),
+          recentDoverPosts: doverResult.posts.slice(0, 2).map((p: any) => ({
+            uri: p.uri,
             indexed_at: p.indexed_at
           }))
         })
@@ -275,7 +394,11 @@ export const handler: Handler = async (event, context) => {
       statusCode: 200,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        message: 'Cryptic Clue a Day Feed Generator',
+        message: 'Multi-feed Generator: Cryptic Clues & Dover NH',
+        feeds: [
+          'crypticclueaday',
+          'dovernh'
+        ],
         endpoints: [
           '/.well-known/did.json',
           '/xrpc/app.bsky.feed.describeFeedGenerator',
