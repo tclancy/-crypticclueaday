@@ -1,3 +1,8 @@
+db.sqlite
+CLAUDE.md
+.claude/*
+context/*
+
 # Logs
 logs
 *.log
